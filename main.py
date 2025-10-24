@@ -102,7 +102,8 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", "-c", type=str, required=True)
-    parser.add_argument("--model", type=str, default="gpt2")
+    parser.add_argument("--model", type=str, default="gpt2",
+                        help="Model name or path. Examples: 'gpt2', 'gpt2-xl', 'Qwen/Qwen2.5-0.5B', 'Qwen/Qwen2.5-1.5B', 'Qwen/Qwen2.5-3B', 'Qwen/Qwen2.5-7B'")
     parser.add_argument("--seed", type=int, default=999)
     parser.add_argument("--nshot", "-n", type=int, default=0)
     parser.add_argument("--test_data_path", type=str, default="")

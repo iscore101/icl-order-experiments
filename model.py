@@ -2,14 +2,19 @@ import torch
 import torch.nn as nn
 import numpy as np
 from tqdm import tqdm
-from transformers import GPT2LMHeadModel, GPT2Tokenizer, GPT2Model
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 
 class ImmutableLM(nn.Module):
     def __init__(self, model_path):
         super(ImmutableLM, self).__init__()
-        self.backbone = GPT2LMHeadModel.from_pretrained(model_path)
-        self.tokenizer = GPT2Tokenizer.from_pretrained(model_path)
+        self.backbone = AutoModelForCausalLM.from_pretrained(model_path, trust_remote_code=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+        # Set pad token if it doesn't exist (needed for Qwen and other models)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
         self.backbone_name = model_path
 
     def get_restricted_token_probability(self, logits, restricted_token, label_length=1, normalize=False):
@@ -34,7 +39,9 @@ class ImmutableLM(nn.Module):
             input_sequence = input_sequence.squeeze(0)
         with torch.no_grad():
             # this is a super lazy/ugly implementation for OOM issue, refactor if have time
-            split = (input_sequence.shape[0] > 20) and (self.backbone_name == 'gpt2-xl')
+            # Handle large models (GPT-2 XL or large Qwen models)
+            is_large_model = any(name in self.backbone_name.lower() for name in ['gpt2-xl', 'xl', 'large', '72b', '32b', '14b'])
+            split = (input_sequence.shape[0] > 20) and is_large_model
             if split:
                 logits = []
                 for sub_sequence in torch.split(input_sequence, 6, dim=0):
@@ -130,13 +137,16 @@ class ImmutableLM(nn.Module):
     def inference_generation_oom(self, input_sequence):
         bsz, seq_len = input_sequence.shape
 
-        # split = (bsz > 20) and (self.backbone_name in ['gpt2-xl', 'gpt2-large'])
+        # More generic OOM handling for different model sizes
+        is_large_model = any(name in self.backbone_name.lower() for name in ['gpt2-xl', 'gpt2-large', 'xl', '72b', '32b'])
+        is_medium_model = any(name in self.backbone_name.lower() for name in ['gpt2-medium', 'medium', '14b', '7b'])
+
         split = 4
-        if self.backbone_name in ['gpt2-xl', 'gpt2-large']:
+        if is_large_model:
             split = 2
         else:
             split = 0
-        if input_sequence.shape[1] > 700 and self.backbone_name in ['gpt2-medium', 'gpt2-xl', 'gpt2-large']:
+        if input_sequence.shape[1] > 700 and (is_medium_model or is_large_model):
             split = 1
 
 
@@ -299,6 +309,9 @@ class ImmutableLM(nn.Module):
 
 
 if __name__ == "__main__":
-    lm = ImmutableLM(model_path='distilgpt2')
+    # Example: Can use GPT-2 or Qwen models
+    # lm = ImmutableLM(model_path='distilgpt2')
+    # lm = ImmutableLM(model_path='Qwen/Qwen2.5-0.5B')
+    lm = ImmutableLM(model_path='gpt2')
 
 
