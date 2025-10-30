@@ -333,7 +333,8 @@ for target_level, token_map, label_vocab in targets:
             if logits is None:
                 continue
             if order_name not in printed_prompt_templates:
-                print(f"\n[Prompt Template][{target_level.upper()}] {order_name}:\n{prompt}")
+                seq_preview = "".join(str(label) for label in label_sequence)
+                print(f"[Prompt Template][{target_level.upper()}] {order_name}: {seq_preview}")
                 printed_prompt_templates.add(order_name)
             prediction, sorted_logits = predict_from_logits(logits)
             label_names = list(logits.keys())
