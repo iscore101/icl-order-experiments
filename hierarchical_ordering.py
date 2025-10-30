@@ -23,6 +23,7 @@ label_values = (0, 1, 2)
 k_examples = shots_per_label * len(label_values)
 num_random_baseline_templates = 3
 num_test_instances_to_run = 200
+topk_logit_report = 5
 print(
     f"[CFG] shots={k_examples} ({shots_per_label} per label) "
     f"random_templates={num_random_baseline_templates} tests_target={num_test_instances_to_run}"
@@ -268,6 +269,18 @@ by_l1, by_l1_l2, label0_cache = prepare_demo_lookup(demo_source_data)
 random.seed(42)
 ordering_templates = build_ordering_templates(shots_per_label, num_random_baseline_templates)
 print(f"[Templates] Using {len(ordering_templates)} orderings: {[name for name, _ in ordering_templates]}")
+for template_name, label_sequence in ordering_templates:
+    seq_preview = "".join(str(label) for label in label_sequence)
+    print(f"  {template_name}: {seq_preview}")
+random_templates = [
+    (name, "".join(str(label) for label in sequence))
+    for name, sequence in ordering_templates
+    if name.startswith("random_baseline_")
+]
+if random_templates:
+    print("[Templates] Random baseline permutations:")
+    for template_name, seq_preview in random_templates:
+        print(f"  {template_name}: {seq_preview}")
 
 candidate_indices = list(range(len(test_source_data)))
 random.shuffle(candidate_indices)
@@ -297,13 +310,14 @@ if not selected_test_indices:
     raise RuntimeError("No test instances satisfy the 10-per-label sampling requirement.")
 
 # ---------------------- Experiment ----------------------
-targets = [("l2", l2_token_map, all_l2), ("l3", l3_token_map, all_l3)]
-overall_results = {"l2": [], "l3": []}
+targets = [("l3", l3_token_map, all_l3)]
+overall_results = {level_name: [] for level_name, _, _ in targets}
 
 print(
     f"\n==== RUNNING EXPERIMENT: tests={len(selected_test_indices)} "
     f"shots={k_examples} orderings={len(ordering_templates)} ===="
 )
+printed_prompt_templates = set()
 for target_level, token_map, label_vocab in targets:
     print(f"\n-- Target: {target_level.upper()} --")
     for run_idx, test_idx in enumerate(selected_test_indices, 1):
@@ -318,7 +332,22 @@ for target_level, token_map, label_vocab in targets:
             logits = get_label_logits(prompt, token_map)
             if logits is None:
                 continue
+            if order_name not in printed_prompt_templates:
+                print(f"\n[Prompt Template][{target_level.upper()}] {order_name}:\n{prompt}")
+                printed_prompt_templates.add(order_name)
             prediction, sorted_logits = predict_from_logits(logits)
+            label_names = list(logits.keys())
+            logit_tensor = torch.tensor([logits[label] for label in label_names], dtype=torch.float32)
+            log_probs = torch.log_softmax(logit_tensor, dim=0)
+            gold_loss = None
+            if gold in logits:
+                gold_idx = label_names.index(gold)
+                gold_loss = float(-log_probs[gold_idx])
+            else:
+                print(
+                    f"[Warn] Gold label '{gold}' missing from logits for template '{order_name}' "
+                    f"test_idx={test_idx}"
+                )
             order_results.append(
                 {
                     "name": order_name,
@@ -326,7 +355,8 @@ for target_level, token_map, label_vocab in targets:
                     "prediction": prediction,
                     "correct": prediction == gold,
                     "gold": gold,
-                    "logits_top3": sorted_logits[:3],
+                    "logits_topk": sorted_logits[:topk_logit_report],
+                    "cross_entropy": gold_loss,
                     "order_trace": [
                         {
                             "label": label_sequence[pos],
@@ -358,10 +388,15 @@ def summarize(results_for_level, level_name, ordering_templates):
         return
 
     template_names = [name for name, _ in ordering_templates]
-    template_stats = {name: {"correct": 0, "total": 0} for name in template_names}
+    template_stats = {
+        name: {"correct": 0, "total": 0, "loss_sum": 0.0, "loss_count": 0}
+        for name in template_names
+    }
     sensitive_instances = 0
     total_orders = 0
     total_correct = 0
+    total_loss_sum = 0.0
+    total_loss_count = 0
 
     for test_result in results_for_level:
         preds = set()
@@ -372,6 +407,12 @@ def summarize(results_for_level, level_name, ordering_templates):
             if order["correct"]:
                 template_stats[name]["correct"] += 1
                 total_correct += 1
+            loss = order.get("cross_entropy")
+            if loss is not None:
+                template_stats[name]["loss_sum"] += loss
+                template_stats[name]["loss_count"] += 1
+                total_loss_sum += loss
+                total_loss_count += 1
             preds.add(order["prediction"])
         if len(preds) > 1:
             sensitive_instances += 1
@@ -380,6 +421,11 @@ def summarize(results_for_level, level_name, ordering_templates):
     print(f"Orders evaluated: {total_orders}")
     if total_orders:
         print(f"Aggregate accuracy: {total_correct / total_orders:.2%} ({total_correct}/{total_orders})")
+    if total_loss_count:
+        print(
+            f"Aggregate cross-entropy: {total_loss_sum / total_loss_count:.4f} "
+            f"(n={total_loss_count})"
+        )
     print(
         f"Sensitive test instances (order changes prediction): "
         f"{sensitive_instances}/{len(results_for_level)}"
@@ -391,9 +437,16 @@ def summarize(results_for_level, level_name, ordering_templates):
             print(f"  {name}: n/a")
             continue
         acc = stats["correct"] / stats["total"]
-        print(f"  {name}: {acc:.2%} ({stats['correct']}/{stats['total']})")
+        if stats["loss_count"]:
+            avg_loss = stats["loss_sum"] / stats["loss_count"]
+            print(
+                f"  {name}: {acc:.2%} ({stats['correct']}/{stats['total']}) | "
+                f"xent={avg_loss:.4f} (n={stats['loss_count']})"
+            )
+        else:
+            print(f"  {name}: {acc:.2%} ({stats['correct']}/{stats['total']}) | xent=n/a")
 
 
-summarize(overall_results["l2"], "l2", ordering_templates)
-summarize(overall_results["l3"], "l3", ordering_templates)
+for target_level, _, _ in targets:
+    summarize(overall_results[target_level], target_level, ordering_templates)
 print("\n[Finished] DBPEDIA ordering experiment.")
